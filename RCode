@@ -1,0 +1,366 @@
+---
+title: "BioStat I Final Project"
+author: "Yaoting Li, Xueqing Zhou, Jiefei Hu, Minhee Kwon"
+date: "2022-12-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  cache = TRUE,
+  error = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  tidy.opts = list(width.cutoff = 60)
+)
+```
+
+```{r load_packages}
+library(VGAM)
+library(MASS)
+library(fmsb)
+library(tidyverse)
+library(gtsummary)
+```
+
+```{r load_data}
+load("./brfss2013.RData")
+dim(brfss2013)
+```
+
+## Research Question
+
+What are the factors that are associated with one's health condition?
+
+## What are the outcome variables of interest in the analysis? 
+
+Our outcome variables of interest are variables measuring the health condition, which include General Health 'genhlth', Have any health care coverage 'hlthpln1', and How Much Time Do You Sleep 'sleptim1'.
+
+## What are the factors associated with health conditions?
+
+Sociodemographic factors of interest include sex 'sex', income level 'income2', and BMI 'BMI'.
+
+Other health-related factors of interest (i.e. factors of preventive health practices and risk behaviors) are frequency eating fruit 'fruit1', frequency drinking 100 percent pure fruit juice 'fruitju1', and average alcoholic drinking per day in past 30 days 'avedrnk2'.
+
+## Summary table of distribution of outcome variables
+
+```{r data_clean_and_categorization}
+# drop duplication
+brfss_unique <- brfss2013[!duplicated(brfss2013$seqno), ]
+
+# drop refused/unknown/not sure
+brfss_tmp <- brfss_unique %>%
+  dplyr::select(genhlth, hlthpln1, sleptim1, sex, income2, weight2, height3, fruit1, fruitju1, avedrnk2, smokday2) %>%
+  na.omit() %>%
+  filter(sleptim1 <=24) %>%
+  filter(!(income2 == 77) & !(income2 == 99)) %>%
+  filter(!(weight2 == 7777) & !(weight2 == 9999) & !(weight2 == '')) %>%
+  filter(!(height3 == 7777) & !(height3 == 9999)) %>%
+  filter(smokday2 == 1|2|3) %>%
+  tibble()
+
+# unify height unit in meters
+tmp_height <- c()
+for (i in brfss_tmp$height3) {
+  if (as.numeric(i) <= 711) {
+    tmp_height <- append(tmp_height, (as.numeric(substr(i, 1, 1))*30.48 + as.numeric(substr(i, 2, 3))*2.54)/100)
+  } else {
+    tmp_height <- append(tmp_height, as.numeric(substr(i, 2, 4))/100)
+  }}
+brfss_tmp$height_new <- tmp_height
+
+# unify weight units in kilograms
+tmp_weight <- c()
+for (i in brfss_tmp$weight2) {
+  if (as.numeric(i) <= 999) {
+    tmp_weight <- append(tmp_weight, as.numeric(i)*0.4536)
+  } else {
+    tmp_weight <- append(tmp_weight, as.numeric(substr(i, 2, 4)))
+  }}
+brfss_tmp$weight_new <- tmp_weight
+
+## categorized fruitju1 & fruit1
+## merge 0 and 300 since both mean less than one time per month
+categorized <- function(variable){
+  ifelse(variable == 0 | variable == 300, "Rarely",
+         ifelse(variable <= 199, "Always",
+                ifelse(variable <= 299, "Very Often", "Sometimes")))
+}
+
+# calculate new 'BMI' variable
+# create new categorical fruit variable
+# provide new category for income level
+brfss_tmp %>% 
+  mutate(BMI = weight_new/height_new^2) %>%
+  mutate(fruitju1_cat = as.factor(categorized(fruitju1)),
+         fruit1_cat = as.factor(categorized(fruit1))) %>%
+  mutate(fruit1_cat = factor(fruit1_cat, levels = c("Always", "Very Often", "Sometimes", "Rarely")),
+         fruitju1_cat = factor(fruitju1_cat, levels = c("Always", "Very Often", "Sometimes", "Rarely"))) %>%
+  mutate(income2 = recode(income2,
+                          "Less than $10,000" = "Less than $20,000",
+                          "Less than $15,000" = "Less than $20,000",
+                          "Less than $25,000" = "Less than $50,000",
+                          "Less than $35,000" = "Less than $50,000",
+                          "Less than $75,000" = "$50,000 or more",
+                          "$75,000 or more" = "$50,000 or more"
+                          )) %>%
+  dplyr::select(genhlth, hlthpln1, sleptim1, sex, income2, BMI, fruit1_cat, fruitju1_cat, avedrnk2, smokday2) -> brfss
+```
+
+```{r hlth_variables}
+brfss_hlth <- brfss %>%
+  dplyr::select(genhlth, hlthpln1, sleptim1) %>%
+  na.omit()
+opts <- options(knitr.kable.NA = "")
+summary(brfss_hlth, digits = 3) %>%
+  knitr::kable(col.names = c("general health", "healthcare coverage", "sleep time"))
+```
+
+## Association between factors of interest and health conditions
+
+### Graphic summaries - Distribution of General Health by Factors of interest
+
+#### by Sex
+
+```{r genhlth~sex}
+brfss %>%
+  group_by(genhlth, sex) %>%
+  tally() %>%
+  mutate(prop = round(n/sum(n),3)) %>%
+  ggplot(aes(x  = genhlth, y = prop, fill = sex)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_brewer(palette = "Oranges") +
+  theme_classic() +
+  labs(title = "Distribution of General Health By Sex",
+       x = "General Health", y = "Proportion")
+```
+
+#### by Income Level
+
+```{r genhlth~income}
+brfss %>%
+  ggplot(aes(x = income2, fill = genhlth)) +
+  geom_bar(position = "fill") +
+  scale_fill_brewer(palette = "Oranges") +
+  theme_classic() +
+  labs(fill = "general health",
+       title = "Distribution of General Health by Income Level") +
+  ylab("Proportion") +
+  xlab("Income level")
+```
+
+#### by BMI
+
+```{r genhlth~BMI}
+brfss %>%
+  ggplot(aes(x = genhlth, y = BMI, fill = genhlth)) +
+  geom_boxplot() + 
+  scale_fill_brewer(palette = "Oranges") +
+  theme_classic() +
+  labs(title = "Distribution of General Health by BMI",
+       x = "General Health", y = "BMI")
+```
+
+#### by Frequency Eating Fruit
+
+```{r genhlth ~ fruit1_cat}
+brfss %>%
+  group_by(genhlth, fruit1_cat) %>%
+  tally() %>%
+  mutate(prop = round(n/sum(n),3)) %>%
+  ggplot(aes(x  = genhlth, y = prop, fill = fruit1_cat)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_brewer(palette = "Oranges") +
+  theme_classic() +
+  labs(fill = "Frequency Eating Fruit",
+       title = "Distribution of General Health By Frequency Eating Fruit",
+       x = "General Health", y = "Proportion")
+```
+
+#### by Frequency Drinking Pure Fruit Juice
+
+```{r genhlth ~ fruitju1_cat}
+brfss %>%
+  group_by(genhlth, fruitju1_cat) %>%
+  tally() %>%
+  mutate(prop = round(n/sum(n),3)) %>%
+  ggplot(aes(x  = genhlth, y = prop, fill = fruitju1_cat)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_brewer(palette = "Oranges") +
+  theme_classic() +
+  labs(fill = "Frequency Drinking Fruit Juice",
+       title = "Distribution of General Health By Frequency Drinking Fruit Juice",
+       x = "General Health", y = "Proportion")
+```
+
+#### by Average Alcoholic Drinking Per Day
+
+```{r genhlth ~ avedrnk}
+brfss %>%
+  ggplot(aes(x = genhlth, y = avedrnk2, fill = genhlth)) +
+  geom_boxplot() + 
+  scale_fill_brewer(palette = "Oranges") +
+  theme_classic() +
+  labs(title = "Distribution of General Health By Average Alcoholic Drinking",
+       x = "General Health", y = "Average alcoholic drinking")
+```
+
+#### by Frequency of Smoking Now
+
+```{r genhlth ~ smoke}
+brfss %>%
+  group_by(genhlth, smokday2) %>%
+  tally() %>%
+  mutate(prop = round(n/sum(n),3)) %>%
+  ggplot(aes(x  = genhlth, y = prop, fill = smokday2)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_brewer(palette = "Oranges") +
+  theme_classic() +
+  labs(fill = "Frequency of Smoking",
+       title = "Distribution of General Health By Frequency of Smoking",
+       x = "General Health", y = "Proportion")
+```
+
+### Numeric summaries - Table One
+
+Table One is used to show numerical summaries of factors of interest by health variables.
+
+It shows number of count and percentage for all categorical variables, and it presents mean and standard deviation for all continuous variables. For the hypothesis testing, Pearson's Chi-square test is used for all categorical variables, and Kruskal-Wallis test is used for all continuous variables.
+
+#### by General Health 'genhlth'
+
+```{r table1_genhlth}
+brfss %>%
+  dplyr::select(-hlthpln1, -sleptim1) %>%
+  tbl_summary(by = genhlth,
+              label = list(sex ~ "Sex",
+                           income2 ~ "Income Level",
+                           BMI ~ "BMI",
+                           avedrnk2 ~ "Average alcoholic drinks per day",
+                           fruit1_cat ~ "Frequency Eating Fruit",
+                           fruitju1_cat ~ "Frequency Drinking Fruit Juices",
+                           smokday2 ~ "Frequency of Days Now Smoking"),
+              statistic = list(all_continuous() ~ "{mean}, ({sd})",
+                               all_categorical() ~ "{n} ({p}%)"),
+              digits = list(BMI ~ c(1,2),
+                            avedrnk2 ~ c(1,2)),
+              type = list(BMI ~ "continuous")) %>%
+  add_p() %>%
+  modify_header(label = "**Factors**") %>%
+  bold_labels()
+```
+
+#### by Healthcare Coverage 'hlthpln1'
+
+```{r table1_hlthpln1}
+brfss %>%
+  dplyr::select(-genhlth, -sleptim1) %>%
+  tbl_summary(by = hlthpln1,
+              label = list(sex ~ "Sex",
+                           income2 ~ "Income Level",
+                           BMI ~ "BMI",
+                           avedrnk2 ~ "Average alcoholic drinks per day",
+                           fruit1_cat ~ "Frequency Eating Fruit",
+                           fruitju1_cat ~ "Frequency Drinking Fruit Juices",
+                           smokday2 ~ "Frequency of Days Now Smoking"),
+              statistic = list(all_continuous() ~ "{mean}, ({sd})",
+                               all_categorical() ~ "{n} ({p}%)"),
+              digits = list(BMI ~ c(1,2),
+                            avedrnk2 ~ c(1,2))) %>%
+  add_p() %>%
+  modify_header(label = "**Factors**") %>%
+  bold_labels()
+```
+
+#### by (in)adequate sleep hours 'sleptim1'
+
+```{r table1_sleptim1}
+brfss %>%
+  mutate(adequate_sleptim = if_else(sleptim1 < 7, "No", "Yes")) -> brfss_slep
+brfss_slep %>%
+  dplyr::select(-sleptim1, -genhlth, -hlthpln1) %>%
+  tbl_summary(by = adequate_sleptim,
+              label = list(sex ~ "Sex",
+                           income2 ~ "Income Level",
+                           BMI ~ "BMI",
+                           avedrnk2 ~ "Average alcoholic drinks per day",
+                           fruit1_cat ~ "Frequency Eating Fruit",
+                           fruitju1_cat ~ "Frequency Drinking Fruit Juices",
+                           smokday2 ~ "Frequency of Days Now Smoking"),
+              statistic = list(all_continuous() ~ "{mean}, ({sd})",
+                               all_categorical() ~ "{n} ({p}%)"),
+              digits = list(BMI ~ c(1,2),
+                            avedrnk2 ~ c(1,2)),
+              type = list(adequate_sleptim ~ "dichotomous",
+                          BMI ~ "continuous")) %>%
+  add_p() %>%
+  modify_header(label = "**Factors**") %>%
+  bold_labels()
+```
+
+## Logistic regression model
+
+### general health
+
+```{r logistic_genhlth}
+brfss$genhlth <- factor(brfss$genhlth, levels = c("Poor", "Fair", "Good", "Very good", "Excellent"))
+
+## multicollinearity assumption check
+VIF(lm(as.numeric(genhlth) ~ sex + income2 + BMI + avedrnk2 + fruit1_cat + fruitju1_cat + smokday2, 
+              data = brfss))
+
+## fit ordered multinomial logistic regression model
+model1 <- polr(genhlth ~ sex + income2 + BMI + avedrnk2 + fruit1_cat + fruitju1_cat + smokday2, 
+               data=brfss, method = c("logistic"))
+
+## calculate and combine both OR and CI into a dataframe
+or <- data.frame(coef(model1) %>% exp())
+interval <- data.frame(exp(confint(model1)))
+table_model1 <- cbind(or, interval) %>% round(3)
+colnames(table_model1) = c("OR", "2.5%", "97.5%")
+
+## calculate p-value
+pval <- drop1(model1, test = 'Chi')
+pval$`Pr(>Chi)`
+```
+
+### healthcare coverage
+
+```{r logistic_hlthpln1}
+## fit binomial logistic regression model
+model2 <- glm(hlthpln1 ~ sex + income2 + BMI + avedrnk2 + fruit1_cat + fruitju1_cat + smokday2, 
+              data = brfss, family = binomial)
+
+## multicollinearity assumption check
+VIF(model2)
+
+## create table output
+tbl_regression(model2, exponentiate = TRUE,
+               label = list(sex ~ "Sex",
+                           income2 ~ "Income Level",
+                           BMI ~ "BMI",
+                           avedrnk2 ~ "Average alcoholic drinks per day",
+                           fruit1_cat ~ "Frequency Eating Fruit",
+                           fruitju1_cat ~ "Frequency Drinking Fruit Juices",
+                           smokday2 ~ "Frequency of Days Now Smoking"))
+```
+
+### sleep time
+
+```{r logistic_adequate_sleptim}
+## fit binomial logistic regression model
+model3 <- glm(as.factor(adequate_sleptim) ~ income2 + BMI + avedrnk2 + fruit1_cat + smokday2, 
+              data = brfss_slep, family = binomial)
+
+## multicollinearity assumption check
+VIF(model3)
+
+## create table output
+tbl_regression(model3, exponentiate = TRUE,
+               label = list(income2 ~ "Income Level",
+                           BMI ~ "BMI",
+                           avedrnk2 ~ "Average alcoholic drinks per day",
+                           fruit1_cat ~ "Frequency Eating Fruit",
+                           smokday2 ~ "Frequency of Days Now Smoking"))
+```
+
